@@ -1,0 +1,4 @@
+pymupdf>=1.28
+numpy>=2.0
+tkinterdnd2>=0.4
+pyinstaller>=6.0

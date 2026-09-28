@@ -1,0 +1,6 @@
+__pycache__/
+build/
+
+# Schemas and change documents are machine data - never commit them.
+*.pdf
+*_Report.txt
