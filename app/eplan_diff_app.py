@@ -63,15 +63,13 @@ def serial_number(page, block):
 def title_block_facts(path):
     """(latest date, machine serial number) out of all title blocks of a schema."""
     latest, serials = None, Counter()
-    with pymupdf.open(path) as doc:
+    with eplan_diff.open_schema(path) as doc:
         for page in doc:
-            block = eplan_diff.title_block(page)
-            if block is None:
-                continue
-            latest = max([latest, *parse_dates(page.get_text(clip=block))], key=lambda d: d or date.min)
-            serial = serial_number(page, block)
-            if serial:
-                serials[serial] += 1
+            for block in eplan_diff.title_blocks(page):
+                latest = max([latest, *parse_dates(page.get_text(clip=block))], key=lambda d: d or date.min)
+                serial = serial_number(page, block)
+                if serial:
+                    serials[serial] += 1
     return latest, serials.most_common(1)[0][0] if serials else None
 
 

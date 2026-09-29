@@ -38,11 +38,24 @@ Zwischenstände bauen.
    eines Textblocks über y-Bänder; die Spans einer Zeile werden nach x sortiert, sonst kippt die
    Reihenfolge zwischen zwei Exporten (`Star-Tec` mal vor, mal nach dem Hersteller) und erzeugt
    Scheinänderungen.
+   **Verglichen wird die normalisierte Schreibweise** (`normalize`): ohne Gross/Klein, Umlaute =
+   `ae/oe/ue`, alle Bindestrich-Varianten = `-`, Leerzeichen zusammengefasst, das zweisprachige
+   ` / ` und ein Bindestrich zwischen Buchstaben = Leerzeichen. Ein neu gezeichnetes Blatt
+   schreibt `Ueberwachung Oel-Luft Mischer` als `Überwachung Öl-Luft-Mischer` und `Elektro /
+   electric` als `Elektro Electric`. In Codes zählt weiter jedes Zeichen (`=2650-1W3`, `+24V`, `/1.1`).
 3. **Pro Blattpaar vergleichen, nie global.** Ein global ausgerichteter Zeilenvergleich verrutscht
    über Blattgrenzen, sobald ein Blatt eingefügt wurde.
-4. **Ersetzung an gleicher Stelle**: geflaggte alte und neue Zeile, deren Rechtecke sich auf dem
-   zugeordneten Blatt zu ≥ 50 % überlappen, sind ein Paar. Innerhalb des Paares nur die
-   abweichenden Spans markieren — und **beide** Blätter aufnehmen, ALT mit dem alten Wert.
+4. **Ersetzung an gleicher Stelle**: geflaggte alte und neue Zeilen, deren Rechtecke sich auf dem
+   zugeordneten Blatt zu ≥ 50 % überlappen, bilden eine **Gruppe** (alle sich überlappenden
+   Zeilen beider Seiten zusammen). Innerhalb der Gruppe nur die Spans markieren, die in den Zeilen
+   der anderen Seite **nicht an derselben Stelle** stehen (± 3 pt nach Abzug des Blattversatzes)
+   — so ist egal, ob ein Export `24 … 24` und `+24V DC` als zwei Zeilen oder als eine schreibt.
+   **Nie als reine Menge ohne Position vergleichen:** rücken Bezeichnungen um eine Stelle
+   weiter (`X2 X3 X4` → `X3 X0 X4`), ist jede verschobene Position eine Änderung, obwohl die
+   Texte in der Zeile vorkommen. **Beide** Blätter aufnehmen, ALT mit dem alten Wert.
+   Vor dem Überlappungstest wird der häufigste Versatz der einmal vorkommenden Zeilen des
+   Blattpaars herausgerechnet (≥ 3 Zeilen): eine neu gezeichnete Seite sitzt oft ein paar Punkte
+   daneben, und kleine Zeilen überlappen sonst ihr Gegenstück nicht mehr.
    Gepaart werden nur Zeilen, die auf **keiner** Seite als verschoben erkannt sind (Regel 5).
    Sonst wird eine hereingerutschte Zeile mit der verdrängten gepaart, und unveränderter
    Text leuchtet (z. B. eine Inhaltsverzeichnis-Gruppe, die ein Blatt weiter gerutscht ist).
@@ -109,8 +122,8 @@ Zwischenstände bauen.
 10. **Grüner Grafikmarker wächst in den Text**, aber nur in Text, der selbst grün markiert ist.
     Verschobener und unveränderter Text daneben bleibt frei, auch wenn er das Rechteck berührt.
     Der rosa Marker wächst nicht.
-11. **Schriftfeld (Fusszeile) nicht vergleichen** — weder Text noch Grafik (`FIELD_TITLE_BLOCK`,
-    nur auf Querformatblättern; Hochformat-Einlagen haben kein Schriftfeld). Bearbeiter, Datum,
+11. **Schriftfeld (Fusszeile) nicht vergleichen** — weder Text noch Grafik (`Template.blocks`,
+    nur auf Blättern mit erkannter Vorlage; Hochformat-Einlagen haben kein Schriftfeld). Bearbeiter, Datum,
     Änderungsnummer, Revision und Historie ändern sich mit jedem Release auf jedem Blatt; ein
     Blatt, auf dem sich nur das ändert, gehört nicht in den Diff. Die Übersichtsseite sagt das in
     der Legende. Für Blattzuordnung (Regel 1) und die Blattnummer-Markierung (Regel 7) wird das
@@ -130,6 +143,11 @@ es liest die Badges und Annotationen zurück und vergleicht sie mit den Rohdokum
 - **Harte Bedingung:** Jede Zeile, deren Text in der anderen Version **gar nicht** vorkommt,
   muss im Diff markiert sein. Wird eine nicht gefunden, endet der Lauf mit
   `N DIFFERENZEN NICHT MARKIERT` und Exit-Code 1.
+  Einzige Ausnahme: Die Zeile ist nur **verlängert oder gekürzt** — alle ihre Teile stehen in
+  einer markierten Zeile der anderen Version (`1059407 15.10.2012` → `… 1216004 24.09.2026`).
+  Dann zeigt die andere Seite die Änderung, und auf dieser gibt es nichts zu markieren.
+  Ebenso eine Zeile, die nur **anders aufgeteilt** ist: alle ihre Teile stehen auf dem
+  zugeordneten Blatt der anderen Version — dort ist nichts geändert.
 - Zeilen, die in beiden Versionen vorkommen, aber unterschiedlich oft, werden aufgelistet
   (typisch: Gruppen-Kopfzeilen, die wiederholt werden, weil eine Gruppe neu über zwei Blätter
   geht). Diese Liste ist zum Durchsehen da, nicht zum Ignorieren.
@@ -144,9 +162,38 @@ nicht blattweise schauen. Eine Zeile mit 0 Vorkommen in der alten Version ist ec
 
 - Die Deckblätter am Ende der Dokumente sind echt (zweiter Dokumentteil, Trade `#M`) und gehören
   in den Diff, wenn sich dort die Projektrevision ändert.
-- Die Schriftfeld-Koordinaten stehen relativ zur Blattgrösse (`FIELD_*`). Bei einer anderen
-  EPLAN-Vorlage diese Brüche prüfen, bevor irgendetwas anderes geändert wird — stimmt die
-  Blattzuordnung nicht, ist jedes Folgeergebnis wertlos.
+- **Schriftfeld-Vorlagen** stehen als `Template`-Profile im Skript, Koordinaten relativ zur
+  Blattgrösse. Erkannt wird pro Blatt **am Beschriftungstext** (`Blatt` bzw. `History` im
+  Label-Feld), nicht am Format — ein fremdes Querformatblatt bekäme sonst ein falsches
+  Schriftfeld. Blätter ohne erkannte Vorlage werden ganz verglichen.
+  - `FUNCTION_TEMPLATE` (aktuell): Schlüssel Funktion + Blatt (`=1041 / 2`), Historie als Streifen
+    über die ganze Unterkante.
+  - `NUMBER_TEMPLATE` (älter, z. B. 1029-0326): Schlüssel Nummer + Blatt (`10041659 / 032`). Die
+    Historie links steht höher als der Rest, und direkt über dem rechten Teil steht Schemainhalt
+    (`Sicherheitsschaltkreis …`) — deshalb zwei Rechtecke statt eines Streifens.
+  - **Fusszeile mit `Dateiname:`** (A4-Schaltplanübersicht, Lieferantenblätter): kommt in mehreren
+    Grössen vor, deshalb über die Beschriftung gefunden statt über feste Brüche — Streifen ab
+    `Dateiname:` bis zum Blattende, Blattnummer unter `Seite/Seiten` bzw. `Page`.
+  **Bei einer unbekannten Vorlage zuerst ein Profil anlegen**, bevor irgendetwas anderes geändert
+  wird. Erkennbar daran, dass die Blattschlüssel auf allen Blättern gleich sind (Rückfall auf die
+  ersten 80 Zeichen = Koordinatenrahmen `B C D …`) — dann ist die Blattzuordnung reine Reihenfolge
+  und jedes Folgeergebnis wertlos. Prüfen: Schlüssel eindeutig und in beiden Revisionen gleich.
+- **Gedrehte Blätter:** Ältere Exporte speichern Querformat als Hochformat mit `/Rotate 90`.
+  PyMuPDF liefert Text und Annotationen dann ungedreht, Blattgrösse und Rendering gedreht —
+  Masken, Schriftfeld und Marker liegen daneben (Absturz „operands could not be broadcast",
+  „rect is infinite or empty"). `open_schema` rechnet die Drehung beim Öffnen in den Inhalt ein
+  (`remove_rotation`, pixelgleich). Schemas nie mit `pymupdf.open` direkt öffnen.
+- **Verschiedene Blattgrösse:** Ein neu gezeichnetes Blatt kann als A4 kommen, wo es A3 war.
+  `match_sheet_sizes` zeichnet das kleinere Blatt als Vektor auf die Grösse des grösseren um —
+  sonst liegen alle Positionen um den Faktor daneben und jede Zeile gilt als neu. **Auf solchen
+  Blättern nur Text vergleichen, keine Grafik:** neu gezeichnet heisst auch neue Geometrie (die
+  Leitungen `24`/`04` lagen alt 21 pt, neu 12 pt auseinander), Deckung unter jedem Versatz 0,20,
+  die ganze Zeichnung würde grün. Das Log nennt jedes solche Blatt. Der Positionsvergleich aus
+  Regel 4 bekommt dort **12 pt statt 3 pt** Toleranz: bei 3 pt leuchten unveränderte
+  Leitungsbeschriftungen (`24`, `04`, `0V DC`, `PE`), bei 12 pt sind sie frei und die neu belegten
+  Stecker-Pins und Aderfarben bleiben markiert (gemessen: 3 und 8 pt zu eng, 12 und 16 pt gleich).
+- **Zwei Schriftfeld-Rechtecke derselben Vorlage müssen überlappen**, nicht aneinanderstossen:
+  eine neue Historienzeile ragt sonst mit ihrer Linie in die Lücke und wird als Grafik markiert.
 
 ## App für Benutzer ohne Claude Code
 

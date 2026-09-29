@@ -41,13 +41,79 @@ TEXT_OFFSET_CANDIDATES = 12
 MARK_OLD = (0.97, 0.70, 0.92)
 MARK_NEW = (0.70, 0.98, 0.70)
 
-# Title block fields as a fraction of the sheet, so other sheet sizes work too.
-FIELD_FUNCTION = (0.9130, 0.9471, 0.9633, 0.9726)
-FIELD_NUMBER = (0.9633, 0.9471, 1.0000, 0.9726)
-FIELD_DESCRIPTION = (0.3518, 0.9448, 0.5654, 0.9981)
-FIELD_SHEET_CELL = (0.9649, 0.9459, 0.9976, 0.9749)
-# Editor, dates and revision change on every sheet with each release - not a change a fitter acts on.
-FIELD_TITLE_BLOCK = (0.0, 0.9330, 1.0, 1.0)
+
+
+class Template:
+    """Where one EPLAN title block layout keeps its fields, as fractions of the sheet.
+
+    `designation` and `sheet` form the key that matches a sheet across revisions. `blocks` are
+    left out of the comparison: editor, dates and revision change on every sheet with each
+    release - not a change a fitter acts on.
+    """
+
+    def __init__(self, name, label, label_text, designation, sheet, description, sheet_cell, blocks):
+        self.name, self.label, self.label_text = name, label, label_text
+        self.designation, self.sheet, self.description = designation, sheet, description
+        self.sheet_cell, self.blocks = sheet_cell, blocks
+
+
+# Function and sheet number bottom right, history strip across the whole bottom edge.
+FUNCTION_TEMPLATE = Template(
+    'Funktion/Blatt', label=(0.0, 0.930, 0.05, 0.948), label_text='History',
+    designation=(0.9130, 0.9471, 0.9633, 0.9726), sheet=(0.9633, 0.9471, 1.0000, 0.9726),
+    description=(0.3518, 0.9448, 0.5654, 0.9981), sheet_cell=(0.9649, 0.9459, 0.9976, 0.9749),
+    blocks=((0.0, 0.9330, 1.0, 1.0),))
+
+# Older layout: drawing number, revision and sheet in a box bottom right; the change history on
+# the left stands higher than the rest, and schema content sits right above the lower part.
+NUMBER_TEMPLATE = Template(
+    'Nummer/Rev./Blatt', label=(0.880, 0.880, 0.925, 0.896), label_text='Blatt',
+    designation=(0.765, 0.898, 0.857, 0.935), sheet=(0.882, 0.898, 0.925, 0.935),
+    description=(0.463, 0.895, 0.715, 0.935), sheet_cell=(0.882, 0.898, 0.925, 0.935),
+    blocks=((0.070, 0.843, 0.348, 0.952), (0.340, 0.878, 0.925, 0.952)))
+
+FOOTER_ANCHORS = ('Dateiname:', 'Dateiname')
+FOOTER_SHEET_LABELS = ('Seite/Seiten', 'Page')
+FOOTER_REGION = 0.8
+
+_templates = {}
+
+DASHES = str.maketrans({'\u2212': '-', '\u2013': '-', '\u2014': '-', '\u2010': '-', '\u2011': '-'})
+UMLAUTS = (('ä', 'ae'), ('ö', 'oe'), ('ü', 'ue'), ('ß', 'ss'))
+SIZE_TOLERANCE = 0.01
+PAIRING_OFFSET_MIN = 3
+SPAN_REACH = 3.0
+# A sheet redrawn at another size moves its labels by up to ~9 pt without changing them.
+SPAN_REACH_REDRAWN = 12.0
+
+
+def normalize(text):
+    """The form two exports of the same entry share.
+
+    A redrawn sheet writes `Ueberwachung Oel-Luft Mischer` as `Überwachung Öl-Luft-Mischer` and
+    `Elektro / electric` as `Elektro Electric` - nothing a fitter acts on. Codes keep every
+    character: a dash between digits (`=2650-1W3`) or a sign (`+24V`) is not touched.
+    """
+    text = text.translate(DASHES).casefold()
+    for umlaut, spelled in UMLAUTS:
+        text = text.replace(umlaut, spelled)
+    text = re.sub(r'\s+/\s+', ' ', text)
+    text = re.sub(r'(?<=[a-z])-(?=[a-z])', ' ', text)
+    return ' '.join(text.split())
+
+
+def open_schema(path):
+    """Open a schema with every sheet's rotation baked into its content.
+
+    Older exports store landscape sheets as portrait turned by 90 degrees. PyMuPDF then gives text
+    and annotations in the unturned frame, but sheet size and rendering in the turned one - masks,
+    title block and markers would all miss. The source file stays untouched.
+    """
+    doc = pymupdf.open(path)
+    for page in doc:
+        if page.rotation:
+            page.remove_rotation()
+    return doc
 
 
 def field(page, fractions):
@@ -61,15 +127,111 @@ def field_text(page, fractions):
     return ' '.join(page.get_text(clip=field(page, fractions)).split())
 
 
+def fractions_of(page, rect):
+    r = page.rect
+    return ((rect.x0 - r.x0) / r.width, (rect.y0 - r.y0) / r.height,
+            (rect.x1 - r.x0) / r.width, (rect.y1 - r.y0) / r.height)
+
+
+def footer_template(page):
+    """Overview pages and supplier sheets: a footer strip starting at 'Dateiname:'.
+
+    It comes in several sizes, so it is found by its labels instead of fixed fractions. The sheet
+    number stands under 'Seite/Seiten' or 'Page'.
+    """
+    words = page.get_text('words')
+    limit = page.rect.y0 + FOOTER_REGION * page.rect.height
+    anchors = [w for w in words if w[4] in FOOTER_ANCHORS and w[1] > limit]
+    if not anchors:
+        return None
+    top = min(w[1] for w in anchors) - 4
+    footer = [w for w in words if w[1] >= top]
+    sheet = None
+    for label in (w for w in footer if w[4] in FOOTER_SHEET_LABELS):
+        below = [pymupdf.Rect(w[:4]) for w in footer
+                 if w[1] >= label[3] - 1 and w[0] < label[2] + 15 and w[2] > label[0] - 15]
+        if below:
+            sheet = below[0]
+            for rect in below[1:]:
+                sheet |= rect
+            break
+    block = pymupdf.Rect(page.rect.x0, top, page.rect.x1, page.rect.y1)
+    sheet_fractions = fractions_of(page, sheet) if sheet else None
+    return Template('Fusszeile mit Dateiname', label=None, label_text=None, designation=None,
+                    sheet=sheet_fractions, description=None,
+                    sheet_cell=sheet_fractions or FUNCTION_TEMPLATE.sheet_cell,
+                    blocks=(fractions_of(page, block),))
+
+
+def template(page):
+    """The title block layout of a sheet; sheets without a known one are compared as a whole."""
+    key = (page.parent.name, id(page.parent), page.number)
+    if key not in _templates:
+        layout = None
+        for known in (NUMBER_TEMPLATE, FUNCTION_TEMPLATE):
+            if known.label_text in field_text(page, known.label):
+                layout = known
+                break
+        _templates[key] = layout or footer_template(page)
+    return _templates[key]
+
+
+def optional_field(page, fractions):
+    return field_text(page, fractions) if fractions else ''
+
+
 def sheet_key(page):
-    key = '%s|%s' % (field_text(page, FIELD_FUNCTION), field_text(page, FIELD_NUMBER))
+    layout = template(page)
+    key = '%s|%s' % (optional_field(page, layout.designation), optional_field(page, layout.sheet)) if layout else '|'
     return key if key.strip('|') else ' '.join(page.get_text().split())[:80]
 
 
 def sheet_label(page):
-    lines = [l.strip() for l in page.get_text(clip=field(page, FIELD_DESCRIPTION)).split('\n') if l.strip()]
-    function = field_text(page, FIELD_FUNCTION)
-    return ('%s / %s' % (function or 'Blatt', field_text(page, FIELD_NUMBER))).strip(), ': '.join(lines[0:3:2])
+    layout = template(page)
+    if layout and layout.description:
+        lines = [l.strip() for l in page.get_text(clip=field(page, layout.description)).split('\n') if l.strip()]
+        description = ': '.join(lines[0:3:2])
+    else:
+        rows = text_rows(page)
+        description = ' '.join(t for t, _ in rows[0][1]) if rows else ''
+    designation = optional_field(page, layout.designation) if layout else ''
+    sheet = optional_field(page, layout.sheet) if layout else ''
+    return ('%s / %s' % (designation or 'Blatt', sheet)).strip(), description
+
+
+def sheet_cell(page):
+    return field(page, (template(page) or FUNCTION_TEMPLATE).sheet_cell)
+
+
+def enlarge_sheet(doc, index, size):
+    """Redraw one sheet onto a larger page, as vector content - text stays text."""
+    source = pymupdf.open()
+    source.insert_pdf(doc, from_page=index, to_page=index)
+    page = doc.new_page(index, width=size.width, height=size.height)
+    page.show_pdf_page(page.rect, source, 0)
+    doc.delete_page(index + 1)
+
+
+def match_sheet_sizes(old, new, pairs):
+    """Bring matched sheets to one size - a redrawn sheet may come as A4 where it was A3.
+
+    All positions would otherwise be off by the scale: no row overlaps its old counterpart,
+    and the graphics comparison cuts both renderings to the smaller one.
+    """
+    resized = []
+    for oi, nj in pairs:
+        if oi is None or nj is None:
+            continue
+        a, b = old[oi].rect, new[nj].rect
+        if abs(a.width - b.width) <= SIZE_TOLERANCE * a.width and abs(a.height - b.height) <= SIZE_TOLERANCE * a.height:
+            continue
+        if a.width * a.height < b.width * b.height:
+            enlarge_sheet(old, oi, b)
+            resized.append(('ALT', oi))
+        else:
+            enlarge_sheet(new, nj, a)
+            resized.append(('NEU', nj))
+    return resized
 
 
 def align_sheets(old, new):
@@ -88,14 +250,14 @@ def align_sheets(old, new):
     return pairs
 
 
-def title_block(page):
-    """Only landscape sheets carry the EPLAN title block; portrait inserts are plain content."""
-    return field(page, FIELD_TITLE_BLOCK) if page.rect.width > page.rect.height else None
+def title_blocks(page):
+    layout = template(page)
+    return [field(page, block) for block in layout.blocks] if layout else []
 
 
 def in_title_block(page, rect):
-    block = title_block(page)
-    return block is not None and block.contains((rect.tl + rect.br) / 2)
+    centre = (rect.tl + rect.br) / 2
+    return any(block.contains(centre) for block in title_blocks(page))
 
 
 def text_blocks(page, include_title_block=False):
@@ -126,7 +288,7 @@ def text_rows(page, include_title_block=False):
             rows.append(current)
     for row in rows:
         row.sort(key=lambda item: round(item[1].x0, 1))
-    return [(' '.join(t for t, _ in row), row) for row in rows]
+    return [(normalize(' '.join(t for t, _ in row)), row) for row in rows]
 
 
 def document_rows(doc):
@@ -140,15 +302,31 @@ def row_rect(items):
     return rect
 
 
-def span_diff(items_old, items_new):
-    matcher = difflib.SequenceMatcher(None, [t for t, _ in items_old], [t for t, _ in items_new], autojunk=False)
-    changed_old, changed_new = [], []
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag in ('delete', 'replace'):
-            changed_old += items_old[i1:i2]
-        if tag in ('insert', 'replace'):
-            changed_new += items_new[j1:j2]
-    return [r for _, r in changed_old], [r for _, r in changed_new]
+def group_span_diff(rows_old, rows_new, offset=(0, 0), reach=SPAN_REACH):
+    """Spans of one side that the other side does not hold on the same spot - however rows are cut.
+
+    Two exports cut the same entry into rows differently (`24 ... 24` and `+24V DC` as two rows
+    or as one), so a span is looked for in all rows of the group. It must stand on the same spot
+    though: labels that moved up by one (`X2 X3 X4` -> `X3 X4 X5`) are changes at each position.
+    Returns {row index: changed span rects} per side.
+    """
+    def changed(rows, other_rows, dx, dy):
+        available = [(normalize(t), r) for items in other_rows for t, r in items]
+        used = set()
+        result = {}
+        for index, items in enumerate(rows):
+            for text, rect in items:
+                key = normalize(text)
+                spot = rect + (dx - reach, dy - reach, dx + reach, dy + reach)
+                match = next((i for i, (other, other_rect) in enumerate(available)
+                              if i not in used and other == key and spot.intersects(other_rect)), None)
+                if match is None:
+                    result.setdefault(index, []).append(rect)
+                else:
+                    used.add(match)
+        return result
+    dx, dy = offset
+    return changed(rows_old, rows_new, dx, dy), changed(rows_new, rows_old, -dx, -dy)
 
 
 def page_slices(sequence):
@@ -259,25 +437,66 @@ def match_moves(old, new, candidates_old, candidates_new, page_map):
     return moved_old, moved_new
 
 
+def pairing_offsets(old, new, page_map):
+    """Per sheet pair, how far the drawing sits apart - rows standing once on both sheets tell.
+
+    A redrawn or rescaled sheet is often placed a few points off; without this, small rows no
+    longer overlap their counterpart and every one of them counts as new.
+    """
+    unique_old, unique_new = defaultdict(dict), defaultdict(dict)
+    for rows, unique in ((old, unique_old), (new, unique_new)):
+        seen = defaultdict(Counter)
+        for page_index, token, _ in rows:
+            seen[page_index][token] += 1
+        for page_index, token, items in rows:
+            if seen[page_index][token] == 1:
+                unique[page_index][token] = row_rect(items)
+    offsets = {}
+    for page_old, page_new in page_map.items():
+        shifts = Counter()
+        for token, rect in unique_old[page_old].items():
+            other = unique_new[page_new].get(token)
+            if other is not None:
+                shifts[(round(other.x0 - rect.x0), round(other.y0 - rect.y0))] += 1
+        best = shifts.most_common(1)
+        offsets[page_old] = best[0][0] if best and best[0][1] >= PAIRING_OFFSET_MIN else (0, 0)
+    return offsets
+
+
 def pair_in_place(old, new, in_old, in_new, page_map):
-    """Rows on the same spot of the matched sheet - the value there was replaced."""
+    """Groups of rows on the same spot of the matched sheet - the value there was replaced.
+
+    Rows overlap once the sheet's own offset is taken out; overlapping rows on both sides form
+    one group, so an entry split into two rows on one side still meets its counterpart.
+    """
+    offsets = pairing_offsets(old, new, page_map)
     by_page_new = defaultdict(list)
     for position in in_new:
         by_page_new[new[position][0]].append(position)
-    pairs, taken = [], set()
+    group = {}
+
+    def root(node):
+        while group.setdefault(node, node) != node:
+            group[node] = group[group[node]]
+            node = group[node]
+        return node
+
     for position in in_old:
-        rect_old = row_rect(old[position][2])
+        dx, dy = offsets.get(old[position][0], (0, 0))
+        rect_old = row_rect(old[position][2]) + (dx, dy, dx, dy)
         for candidate in by_page_new.get(page_map.get(old[position][0]), ()):
-            if candidate in taken:
-                continue
             rect_new = row_rect(new[candidate][2])
             overlap = (rect_old & rect_new).get_area()
             if overlap and overlap / min(rect_old.get_area(), rect_new.get_area()) >= OVERLAP_RATIO:
-                taken.add(candidate)
-                pairs.append((position, candidate))
-                break
-    paired_old = {position for position, _ in pairs}
-    return pairs, [p for p in in_old if p not in paired_old], [p for p in in_new if p not in taken]
+                group[root(('old', position))] = root(('new', candidate))
+    members = defaultdict(lambda: ([], []))
+    for node in list(group):
+        side, position = node
+        members[root(node)][0 if side == 'old' else 1].append(position)
+    groups = [(sorted(o), sorted(n)) for o, n in members.values() if o and n]
+    grouped_old = {p for o, _ in groups for p in o}
+    grouped_new = {p for _, n in groups for p in n}
+    return groups, [p for p in in_old if p not in grouped_old], [p for p in in_new if p not in grouped_new], offsets
 
 
 def same_article(a, b):
@@ -318,7 +537,7 @@ def article_completion(rows, marked, flagged):
     return added
 
 
-def text_diff(doc_old, doc_new, page_map):
+def text_diff(doc_old, doc_new, page_map, redrawn=()):
     old, new = document_rows(doc_old), document_rows(doc_new)
     reverse_map = {value: key for key, value in page_map.items()}
     in_old, in_new = flagged_positions(old, new, page_map)
@@ -335,8 +554,8 @@ def text_diff(doc_old, doc_new, page_map):
     candidates_new = in_new + unpaired_new + [p for p, row in enumerate(new) if row[0] in overflow_new]
     moved_old, moved_new = match_moves(old, new, candidates_old, candidates_new, page_map)
 
-    pairs, rest_old, rest_new = pair_in_place(old, new, [p for p in in_old if p not in moved_old],
-                                              [p for p in in_new if p not in moved_new], page_map)
+    groups, rest_old, rest_new, offsets = pair_in_place(old, new, [p for p in in_old if p not in moved_old],
+                                                        [p for p in in_new if p not in moved_new], page_map)
     rest_old += [p for p in unpaired_old if p not in moved_old]
     rest_new += [p for p in unpaired_new if p not in moved_new]
     in_old, in_new = in_old + unpaired_old, in_new + unpaired_new
@@ -345,13 +564,18 @@ def text_diff(doc_old, doc_new, page_map):
     rest_old = [p for p in rest_old if p not in moved_old]
     rest_new = [p for p in rest_new if p not in moved_new]
     rects_old, rects_new = defaultdict(list), defaultdict(list)
-    for position_old, position_new in pairs:
-        changed_old, changed_new = span_diff(old[position_old][2], new[position_new][2])
-        rects_old[old[position_old][0]] += changed_old
-        rects_new[new[position_new][0]] += changed_new
-
-    marked_old = set(rest_old) | {p for p, _ in pairs}
-    marked_new = set(rest_new) | {p for _, p in pairs}
+    marked_old, marked_new = set(rest_old), set(rest_new)
+    for group_old, group_new in groups:
+        page_old = old[group_old[0]][0]
+        changed_old, changed_new = group_span_diff(
+            [old[p][2] for p in group_old], [new[p][2] for p in group_new], offsets.get(page_old, (0, 0)),
+            SPAN_REACH_REDRAWN if page_old in redrawn else SPAN_REACH)
+        for index, rects in changed_old.items():
+            rects_old[old[group_old[index]][0]] += rects
+            marked_old.add(group_old[index])
+        for index, rects in changed_new.items():
+            rects_new[new[group_new[index]][0]] += rects
+            marked_new.add(group_new[index])
     whole_old = set(rest_old) | article_completion(old, marked_old, in_old)
     whole_new = set(rest_new) | article_completion(new, marked_new, in_new)
     for position in whole_old:
@@ -391,9 +615,9 @@ def dilate(mask, radius=1):
 
 def text_mask(page, shape):
     mask = np.zeros(shape, bool)
-    block = title_block(page)
-    if block is not None:
-        mask[max(0, int(block.y0 * SCALE)):, :] = True
+    for block in title_blocks(page):
+        mask[max(0, int(block.y0 * SCALE)):int(block.y1 * SCALE) + 1,
+             max(0, int(block.x0 * SCALE)):int(block.x1 * SCALE) + 1] = True
     for _, items in text_rows(page, include_title_block=True):
         for _, rect in items:
             x0 = max(0, int((rect.x0 - TEXT_KEEPOUT) * SCALE))
@@ -439,7 +663,9 @@ def shift_coverage(source, other, box, text_offsets=()):
     frames travel with their entries, also further away and into the other column.
     """
     x0, y0 = int(box.x0 * SCALE), int(box.y0 * SCALE)
-    x1, y1 = int(box.x1 * SCALE), int(box.y1 * SCALE)
+    # Clusters are rounded up to whole cells and can reach past the sheet edge; numpy would cut
+    # the patch silently while a shifted slice of the other sheet stays full width.
+    x1, y1 = min(int(box.x1 * SCALE), source.shape[1]), min(int(box.y1 * SCALE), source.shape[0])
     patch = source[y0:y1, x0:x1]
     ink = patch.sum()
     if ink == 0:
@@ -573,11 +799,14 @@ def merge_rects(rects):
     return boxes
 
 
-def collect_changes(old, new, pairs, log):
+def collect_changes(old, new, pairs, log, text_only=()):
+    """`text_only`: old sheet indexes whose pair had to be rescaled - a sheet redrawn at another
+    size lies on its old version nowhere pixel for pixel, the graphics comparison would light up
+    the whole drawing. Their text is still compared."""
     page_map = {oi: nj for oi, nj in pairs if oi is not None and nj is not None}
     log('Zeilenvergleich ...')
     text_old, text_new, shifted_old, shifted_new, added_spans, shifted, overflow_old, overflow_new, \
-        extended_old, extended_new = text_diff(old, new, page_map)
+        extended_old, extended_new = text_diff(old, new, page_map, text_only)
     for page_index in sorted(overflow_old):
         log('  ALT Blatt %d entfallen, Inhalt nur umgebrochen - nicht aufgenommen' % (page_index + 1))
     for page_index in sorted(overflow_new):
@@ -597,17 +826,18 @@ def collect_changes(old, new, pairs, log):
             continue
         if oi is None or nj is None:
             page = new[nj] if nj is not None else old[oi]
-            cell = field(page, FIELD_SHEET_CELL)
+            cell = sheet_cell(page)
             changes.append((oi, nj, [cell] if oi is not None else [], [cell] if nj is not None else [], True))
             continue
         rects_old = list(text_old.get(oi, []))
         rects_new = list(text_new.get(nj, []))
-        boxes_old, boxes_new, dropped = graphics_diff(
-            old[oi], new[nj], added_spans.get(nj, ()),
-            (shifted_old.get(oi, ()), shifted_new.get(nj, ())), (rects_old, rects_new))
-        rects_old += boxes_old
-        rects_new += boxes_new
-        dropped_graphics += [(oi + 1, nj + 1, side, box) for side, box in dropped]
+        if oi not in text_only:
+            boxes_old, boxes_new, dropped = graphics_diff(
+                old[oi], new[nj], added_spans.get(nj, ()),
+                (shifted_old.get(oi, ()), shifted_new.get(nj, ())), (rects_old, rects_new))
+            rects_old += boxes_old
+            rects_new += boxes_new
+            dropped_graphics += [(oi + 1, nj + 1, side, box) for side, box in dropped]
         if rects_old or rects_new:
             changes.append((oi, nj, merge_rects(rects_old), merge_rects(rects_new), False))
         if number % 25 == 0:
@@ -751,16 +981,35 @@ def read_marks(out_path):
     return marks, whole
 
 
+def marked_rows(side, rows, marks):
+    """Span multisets of the rows that carry a marker in the produced PDF."""
+    return [Counter(normalize(t) for t, _ in items) for page_index, _, items in rows
+            if any(rect.intersects(mark) for _, rect in items for mark in marks[(side, page_index)])]
+
+
 def verify(old, new, out_path, report):
-    """No difference may be missing: every row that exists in only one version must be marked."""
+    """No difference may be missing: every row that exists in only one version must be marked.
+
+    A row that only grew or shrank shows its change on one side alone - the added value is green,
+    the old row itself has nothing to mark. It counts as covered when all of its parts stand in a
+    marked row of the other version. A row that was only cut differently - its parts all stand on
+    the matched sheet of the other version - holds no difference at all.
+    """
     marks, whole = read_marks(out_path)
     rows_old, rows_new = document_rows(old), document_rows(new)
+    page_map = {a: b for a, b in align_sheets(old, new) if a is not None and b is not None}
+    sheet_spans = {'ALT': defaultdict(Counter), 'NEU': defaultdict(Counter)}
+    for side, rows in (('ALT', rows_old), ('NEU', rows_new)):
+        for page_index, _, items in rows:
+            sheet_spans[side][page_index].update(normalize(t) for t, _ in items)
+    counterpart = {'ALT': page_map, 'NEU': {b: a for a, b in page_map.items()}}
     counts_old = Counter(token for _, token, _ in rows_old)
     counts_new = Counter(token for _, token, _ in rows_new)
+    marked = {'ALT': marked_rows('ALT', rows_old, marks), 'NEU': marked_rows('NEU', rows_new, marks)}
 
     missing, checked = [], 0
-    for side, rows, own, other in (('ALT', rows_old, counts_old, counts_new),
-                                   ('NEU', rows_new, counts_new, counts_old)):
+    for side, other_side, rows, own, other in (('ALT', 'NEU', rows_old, counts_old, counts_new),
+                                               ('NEU', 'ALT', rows_new, counts_new, counts_old)):
         for page_index, token, items in rows:
             if other[token]:
                 continue
@@ -768,6 +1017,12 @@ def verify(old, new, out_path, report):
             if (side, page_index) in whole:
                 continue
             covered = any(rect.intersects(mark) for _, rect in items for mark in marks[(side, page_index)])
+            if not covered:
+                parts = Counter(normalize(t) for t, _ in items)
+                covered = any(not parts - row for row in marked[other_side])
+            if not covered:
+                partner = counterpart[side].get(page_index)
+                covered = partner is not None and not parts - sheet_spans[other_side][partner]
             if not covered:
                 missing.append((side, page_index + 1, token))
 
@@ -806,7 +1061,7 @@ def main():
         print(line, flush=True)
         lines.append(line)
 
-    old, new = pymupdf.open(args.old), pymupdf.open(args.new)
+    old, new = open_schema(args.old), open_schema(args.new)
     out_path = args.out or re.sub(r'\.pdf$', '', args.new, flags=re.I) + '_Aenderungen.pdf'
     names = (args.old.replace('\\', '/').split('/')[-1], args.new.replace('\\', '/').split('/')[-1])
 
@@ -816,8 +1071,13 @@ def main():
     report('Blattzuordnung: %d Paare, %d nur alt, %d nur neu'
            % (sum(1 for a, b in pairs if a is not None and b is not None),
               sum(1 for a, b in pairs if b is None), sum(1 for a, b in pairs if a is None)))
+    reverse_pairs = {b: a for a, b in pairs if a is not None and b is not None}
+    text_only = set()
+    for side, index in match_sheet_sizes(old, new, pairs):
+        report('  %s Blatt %d hat eine andere Blattgroesse - skaliert, nur Text verglichen' % (side, index + 1))
+        text_only.add(index if side == 'ALT' else reverse_pairs[index])
 
-    changes, shifted, dropped_graphics = collect_changes(old, new, pairs, report)
+    changes, shifted, dropped_graphics = collect_changes(old, new, pairs, report, text_only)
     rows = build(changes, old, new, names, out_path)
     report('')
     report('geschrieben: %s  (%d geaenderte Blaetter)' % (out_path, len(rows)))
