@@ -11,8 +11,13 @@ Versionen** — das wurde verworfen, weil ersetzter Text übereinanderliegt und 
 
 ## In einem Durchgang
 
+Dieses Projekt ist die einzige Quelle. Der Skill-Ordner `~/.claude/skills/eplan-schema-diff/`
+enthält nur einen kurzen Verweis hierher und keine Kopie von Skript, GUI oder Regeln — zwei
+Stände sind schon einmal auseinandergelaufen. Ändert sich die `description` im Frontmatter
+dieser Datei, muss sie dort nachgezogen werden; alles andere nicht.
+
 ```
-python ~/.claude/skills/eplan-schema-diff/eplan_diff.py ALT.pdf NEU.pdf -o Aenderungen.pdf --report report.txt
+python C:\Projects\SchemaDiff\eplan_diff.py ALT.pdf NEU.pdf -o Aenderungen.pdf --report report.txt
 ```
 
 Das Skript macht Blattzuordnung, Text- und Grafikvergleich, baut das PDF und prüft am Schluss
